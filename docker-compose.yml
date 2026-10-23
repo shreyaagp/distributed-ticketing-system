@@ -1,0 +1,275 @@
+services:
+  listing-db:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: postgres
+      POSTGRES_DB: listing_service_db
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres -d listing_service_db"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+    volumes:
+      - listing-db-data:/var/lib/postgresql/data
+
+  order-db:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: postgres
+      POSTGRES_DB: order_service_db
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres -d order_service_db"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+    volumes:
+      - order-db-data:/var/lib/postgresql/data
+
+  notification-db:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: postgres
+      POSTGRES_DB: notification_service_db
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres -d notification_service_db"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+    volumes:
+      - notification-db-data:/var/lib/postgresql/data
+
+  keycloak-db:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_USER: keycloak
+      POSTGRES_PASSWORD: keycloak
+      POSTGRES_DB: keycloak
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U keycloak -d keycloak"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+    volumes:
+      - keycloak-db-data:/var/lib/postgresql/data
+
+  keycloak:
+    image: quay.io/keycloak/keycloak:26.3
+    command: start-dev
+    environment:
+      KC_DB: postgres
+      KC_DB_URL: jdbc:postgresql://keycloak-db:5432/keycloak
+      KC_DB_USERNAME: keycloak
+      KC_DB_PASSWORD: keycloak
+      KEYCLOAK_ADMIN: admin
+      KEYCLOAK_ADMIN_PASSWORD: admin
+    ports:
+      - "8080:8080"
+    depends_on:
+      keycloak-db:
+        condition: service_healthy
+
+  etcd:
+    image: bitnamilegacy/etcd:3.6.4
+    environment:
+      ALLOW_NONE_AUTHENTICATION: "yes"
+      ETCD_ENABLE_V2: "true"
+      ETCD_ADVERTISE_CLIENT_URLS: http://etcd:2379
+    healthcheck:
+      test: ["CMD", "etcdctl", "endpoint", "health"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+  consul:
+    image: hashicorp/consul:latest
+    container_name: consul
+    command: agent -dev -client=0.0.0.0
+    ports:
+      - "8500:8500"
+
+  apisix:
+    image: apache/apisix:3.13.0-debian
+    environment:
+      KEYCLOAK_CLIENT_ID: ${KEYCLOAK_CLIENT_ID:-ticketing-app}
+      KEYCLOAK_CLIENT_SECRET: ${KEYCLOAK_CLIENT_SECRET:-qihxyWCo3XoBK0jwN6WxqCfmbWjm4WXt}
+      KEYCLOAK_DISCOVERY_URL: http://keycloak:8080/realms/ticketing/.well-known/openid-configuration
+    ports:
+      - "9080:9080"
+      - "9090:9090"
+    volumes:
+      - ./apisix/config.yaml:/usr/local/apisix/conf/config.yaml:ro
+    healthcheck:
+      test: ["CMD", "test", "-f", "/usr/local/apisix/logs/nginx.pid"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+    depends_on:
+      etcd:
+        condition: service_healthy
+      jaeger:
+        condition: service_started
+
+  apisix-init:
+    build:
+      context: .
+      dockerfile: Dockerfile.apisix-init
+    environment:
+      KEYCLOAK_CLIENT_ID: ${KEYCLOAK_CLIENT_ID:-ticketing-app}
+      KEYCLOAK_CLIENT_SECRET: ${KEYCLOAK_CLIENT_SECRET:-qihxyWCo3XoBK0jwN6WxqCfmbWjm4WXt}
+      KEYCLOAK_DISCOVERY_URL: http://keycloak:8080/realms/ticketing/.well-known/openid-configuration
+    depends_on:
+      apisix:
+        condition: service_healthy
+
+  jaeger:
+    image: jaegertracing/all-in-one:latest
+    environment:
+      COLLECTOR_OTLP_ENABLED: "true"
+    ports:
+      - "16686:16686"
+      - "4317:4317"
+      - "4318:4318"
+
+  redpanda:
+    image: docker.redpanda.com/redpandadata/redpanda:v24.3.7
+    command:
+      - redpanda
+      - start
+      - --overprovisioned
+      - --smp
+      - "1"
+      - --memory
+      - 512M
+      - --reserve-memory
+      - 0M
+      - --node-id
+      - "0"
+      - --check=false
+      - --kafka-addr
+      - internal://0.0.0.0:9092
+      - --advertise-kafka-addr
+      - internal://redpanda:9092
+    healthcheck:
+      test: ["CMD-SHELL", "rpk cluster health -X brokers=redpanda:9092 | grep -q 'Healthy:.*true'"]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+
+  db-setup:
+    build:
+      context: .
+      dockerfile: Dockerfile.order
+      target: builder
+    environment:
+      LISTING_DATABASE_URL: postgres://postgres:postgres@listing-db:5432/listing_service_db
+      ORDER_DATABASE_URL: postgres://postgres:postgres@order-db:5432/order_service_db
+      NOTIFICATION_DATABASE_URL: postgres://postgres:postgres@notification-db:5432/notification_service_db
+    command: sh -c "npm run db:push && npm run db:seed:listing"
+    depends_on:
+      listing-db:
+        condition: service_healthy
+      order-db:
+        condition: service_healthy
+      notification-db:
+        condition: service_healthy
+
+  listing:
+    build:
+      context: .
+      dockerfile: Dockerfile.listing
+    environment:
+      LISTING_DATABASE_URL: postgres://postgres:postgres@listing-db:5432/listing_service_db
+      LISTING_GRPC_BIND_ADDRESS: 0.0.0.0:50051
+      OTEL_SERVICE_NAME: listing-service
+      OTEL_EXPORTER_OTLP_TRACES_ENDPOINT: http://jaeger:4318/v1/traces
+      CONSUL_HTTP_ADDR: http://consul:8500
+      CONSUL_SERVICE_NAME: listing
+    depends_on:
+      db-setup:
+        condition: service_completed_successfully
+      jaeger:
+        condition: service_started
+      consul:
+        condition: service_started
+
+  payment:
+    build:
+      context: .
+      dockerfile: Dockerfile.payment
+    environment:
+      PAYMENT_GRPC_BIND_ADDRESS: 0.0.0.0:50052
+      OTEL_SERVICE_NAME: payment-service
+      OTEL_EXPORTER_OTLP_TRACES_ENDPOINT: http://jaeger:4318/v1/traces
+    depends_on:
+      jaeger:
+        condition: service_started
+
+  order:
+    build:
+      context: .
+      dockerfile: Dockerfile.order
+    environment:
+      ORDER_GRPC_BIND_ADDRESS: 0.0.0.0:50053
+      ORDER_DATABASE_URL: postgres://postgres:postgres@order-db:5432/order_service_db
+      LISTING_SERVICE_ADDRESS: listing:50051
+      PAYMENT_SERVICE_ADDRESS: payment:50052
+      ORDER_AMOUNT: 100
+      OTEL_SERVICE_NAME: order-service
+      OTEL_EXPORTER_OTLP_TRACES_ENDPOINT: http://jaeger:4318/v1/traces
+      CONSUL_HTTP_ADDR: http://consul:8500
+      CONSUL_SERVICE_NAME: order
+    depends_on:
+      db-setup:
+        condition: service_completed_successfully
+      listing:
+        condition: service_started
+      payment:
+        condition: service_started
+      jaeger:
+        condition: service_started
+      consul:
+        condition: service_started
+
+  order-outbox:
+    build:
+      context: .
+      dockerfile: Dockerfile.order
+    command: npm run start:order-outbox
+    environment:
+      ORDER_DATABASE_URL: postgres://postgres:postgres@order-db:5432/order_service_db
+      KAFKA_BROKERS: redpanda:9092
+      OTEL_SERVICE_NAME: order-outbox-worker
+      OTEL_EXPORTER_OTLP_TRACES_ENDPOINT: http://jaeger:4318/v1/traces
+    depends_on:
+      db-setup:
+        condition: service_completed_successfully
+      redpanda:
+        condition: service_healthy
+      jaeger:
+        condition: service_started
+
+  notification:
+    build:
+      context: .
+      dockerfile: Dockerfile.notification
+    environment:
+      NOTIFICATION_DATABASE_URL: postgres://postgres:postgres@notification-db:5432/notification_service_db
+      KAFKA_BROKERS: redpanda:9092
+      OTEL_SERVICE_NAME: notification-service
+      OTEL_EXPORTER_OTLP_TRACES_ENDPOINT: http://jaeger:4318/v1/traces
+    depends_on:
+      db-setup:
+        condition: service_completed_successfully
+      redpanda:
+        condition: service_healthy
+      jaeger:
+        condition: service_started
+
+volumes:
+  listing-db-data:
+  order-db-data:
+  notification-db-data:
+  keycloak-db-data:
