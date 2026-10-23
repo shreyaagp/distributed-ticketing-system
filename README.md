@@ -302,23 +302,6 @@ When payment succeeds, Order updates the order status and inserts an outbox row 
 
 `src/notification-service.ts` inserts the event id into a `processed_events` table with `onConflictDoNothing()`. Duplicate Kafka deliveries are ignored.
 
-## Branch Learning Path
-
-This repo also has branches that represent incremental learning steps:
-
-- `01-outbox`
-- `02-inbox-pattern`
-- `03-the-saga`
-- `04-gateway`
-- `05-packaging`
-- `06-gateway-to-service-grpc`
-- `07-keyclock`
-- `07-routing-table`
-- `08-apisix`
-- `09-opentelemetry`
-- `kafka-messaging`
-
-Use them to compare how the project evolved from simpler service boundaries toward gateway, authentication, messaging, and tracing.
 
 ## Reset Local State
 
