@@ -1,5 +1,4 @@
-# Ticketing Microservice
-
+# Distributed Ticketing System
 A learning-oriented Node.js microservices project for exploring service ownership, gRPC, Kafka messaging, transactional outbox, idempotent consumers, API gateway routing, OpenID Connect, and distributed tracing.
 
 The project models a small ticket ordering flow:
